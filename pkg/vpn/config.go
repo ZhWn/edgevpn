@@ -41,6 +41,9 @@ type Config struct {
 	ChannelBufferSize int
 	MaxStreams        int
 	lowProfile        bool
+
+	// NoTUN 模式：使用 userspace networking 替代 TUN 设备
+	NoTUN bool
 }
 
 type Option func(cfg *Config) error
@@ -159,6 +162,14 @@ func WithInterfaceName(i string) func(cfg *Config) error {
 func WithInterfaceAddress(i string) func(cfg *Config) error {
 	return func(cfg *Config) error {
 		cfg.InterfaceAddress = i
+		return nil
+	}
+}
+
+// WithNoTUN 启用/禁用 userspace networking 模式
+func WithNoTUN(enabled bool) func(cfg *Config) error {
+	return func(cfg *Config) error {
+		cfg.NoTUN = enabled
 		return nil
 	}
 }

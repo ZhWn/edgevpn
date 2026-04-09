@@ -73,6 +73,12 @@ var CommonFlags []cli.Flag = []cli.Flag{
 		EnvVars: []string{"EDGEVPNBOOTSTRAPIFACE"},
 		Value:   true,
 	},
+	&cli.BoolFlag{
+		Name:    "no-tun",
+		Usage:   "Run in userspace networking mode (no TUN device required, exposes virtual IP via netstack)",
+		EnvVars: []string{"EDGEVPN_NO_TUN"},
+		Value:   false,
+	},
 	&cli.IntFlag{
 		Name:    "packet-mtu",
 		Usage:   "Specify a mtu",
@@ -432,6 +438,7 @@ func ConfigFromContext(c *cli.Context) *config.Config {
 		InterfaceMTU:      c.Int("mtu"),
 		PacketMTU:         c.Int("packet-mtu"),
 		BootstrapIface:    c.Bool("bootstrap-iface"),
+		NoTUN:             c.Bool("no-tun"),
 		Whitelist:         stringsToMultiAddr(c.StringSlice("whitelist")),
 		Ledger: config.Ledger{
 			StateDir:         c.String("ledger-state"),

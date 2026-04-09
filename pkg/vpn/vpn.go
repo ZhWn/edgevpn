@@ -62,63 +62,127 @@ func VPNNetworkService(p ...Option) node.NetworkService {
 			return err
 		}
 
-		ifce, err := createInterface(c)
-		if err != nil {
-			return err
-		}
-		defer ifce.Close()
-
-		var mgr streamManager
-
-		if c.lowProfile {
-			// Create stream manager for outgoing connections
-			mgr, err = stream.NewConnManager(10, c.MaxStreams)
-			if err != nil {
-				return err
-			}
-			// Attach it to the same context
-			go func() {
-				<-ctx.Done()
-				mgr.Close()
-			}()
+		// 根据 NoTUN 标志选择模式
+		if c.NoTUN {
+			return runNetStackMode(ctx, c, n, b, nc)
 		}
 
-		// Set stream handler during runtime
-		n.Host().SetStreamHandler(protocol.EdgeVPN.ID(), streamHandler(b, ifce, c, nc))
-
-		// Announce our IP
-		ip, _, err := net.ParseCIDR(c.InterfaceAddress)
-		if err != nil {
-			return err
-		}
-
-		b.Announce(
-			ctx,
-			c.LedgerAnnounceTime,
-			func() {
-				machine := &types.Machine{}
-				// Retrieve current ID for ip in the blockchain
-				existingValue, found := b.GetKey(protocol.MachinesLedgerKey, ip.String())
-				existingValue.Unmarshal(machine)
-
-				// If mismatch, update the blockchain
-				if !found || machine.PeerID != n.Host().ID().String() {
-					updatedMap := map[string]interface{}{}
-					updatedMap[ip.String()] = newBlockChainData(n, ip.String())
-					b.Add(protocol.MachinesLedgerKey, updatedMap)
-				}
-			},
-		)
-
-		if c.NetLinkBootstrap {
-			if err := prepareInterface(c); err != nil {
-				return err
-			}
-		}
-
-		// read packets from the interface
-		return readPackets(ctx, mgr, c, n, b, ifce, nc)
+		// 传统 TUN 模式
+		return runTUNMode(ctx, c, n, b, nc)
 	}
+}
+
+// runNetStackMode 运行 userspace networking 模式（无需 TUN 设备）
+func runNetStackMode(ctx context.Context, c *Config, n *node.Node, b *blockchain.Ledger, nc node.Config) error {
+	c.Logger.Info("Starting EdgeVPN in No-TUN mode (userspace networking)")
+
+	// 1. 创建 netstack 协议栈
+	ns, err := NewNetStack(c.InterfaceAddress, c.InterfaceMTU)
+	if err != nil {
+		return err
+	}
+	defer ns.Close()
+
+	// 2. 注册入站流处理器
+	// 同时注册 EdgeVPN 和 EdgeVPNNoTUN 协议，确保与 TUN 和 No-TUN 节点都兼容
+	n.Host().SetStreamHandler(
+		protocol.EdgeVPN.ID(),
+		InboundStreamHandler(b, ns, nc),
+	)
+	n.Host().SetStreamHandler(
+		protocol.EdgeVPNNoTUN.ID(),
+		InboundStreamHandler(b, ns, nc),
+	)
+
+	// 3. 在区块链注册本机
+	ip, _, err := net.ParseCIDR(c.InterfaceAddress)
+	if err != nil {
+		return err
+	}
+
+	b.Announce(
+		ctx,
+		c.LedgerAnnounceTime,
+		func() {
+			machine := &types.Machine{}
+			existingValue, found := b.GetKey(protocol.MachinesLedgerKey, ip.String())
+			existingValue.Unmarshal(machine)
+
+			if !found || machine.PeerID != n.Host().ID().String() {
+				updatedMap := map[string]interface{}{}
+				updatedMap[ip.String()] = newBlockChainData(n, ip.String())
+				b.Add(protocol.MachinesLedgerKey, updatedMap)
+			}
+		},
+	)
+
+	// 4. 启动出站处理
+	outbound := NewOutboundHandler(ns, b, n.Host(), c.Logger)
+	go outbound.Start(ctx)
+
+	c.Logger.Info("No-TUN mode started successfully")
+	<-ctx.Done()
+	return nil
+}
+
+// runTUNMode 运行传统 TUN 设备模式
+func runTUNMode(ctx context.Context, c *Config, n *node.Node, b *blockchain.Ledger, nc node.Config) error {
+	ifce, err := createInterface(c)
+	if err != nil {
+		return err
+	}
+	defer ifce.Close()
+
+	var mgr streamManager
+
+	if c.lowProfile {
+		// Create stream manager for outgoing connections
+		mgr, err = stream.NewConnManager(10, c.MaxStreams)
+		if err != nil {
+			return err
+		}
+		// Attach it to the same context
+		go func() {
+			<-ctx.Done()
+			mgr.Close()
+		}()
+	}
+
+	// Set stream handler during runtime
+	n.Host().SetStreamHandler(protocol.EdgeVPN.ID(), streamHandler(b, ifce, c, nc))
+
+	// Announce our IP
+	ip, _, err := net.ParseCIDR(c.InterfaceAddress)
+	if err != nil {
+		return err
+	}
+
+	b.Announce(
+		ctx,
+		c.LedgerAnnounceTime,
+		func() {
+			machine := &types.Machine{}
+			// Retrieve current ID for ip in the blockchain
+			existingValue, found := b.GetKey(protocol.MachinesLedgerKey, ip.String())
+			existingValue.Unmarshal(machine)
+
+			// If mismatch, update the blockchain
+			if !found || machine.PeerID != n.Host().ID().String() {
+				updatedMap := map[string]interface{}{}
+				updatedMap[ip.String()] = newBlockChainData(n, ip.String())
+				b.Add(protocol.MachinesLedgerKey, updatedMap)
+			}
+		},
+	)
+
+	if c.NetLinkBootstrap {
+		if err := prepareInterface(c); err != nil {
+			return err
+		}
+	}
+
+	// read packets from the interface
+	return readPackets(ctx, mgr, c, n, b, ifce, nc)
 }
 
 // Start the node and the vpn. Returns an error in case of failure

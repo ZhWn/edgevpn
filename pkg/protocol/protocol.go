@@ -22,6 +22,10 @@ const (
 	ServiceProtocol Protocol = "/edgevpn/service/0.1"
 	FileProtocol    Protocol = "/edgevpn/file/0.1"
 	EgressProtocol  Protocol = "/edgevpn/egress/0.1"
+
+	// EdgeVPNNoTUN 是 No-TUN 模式使用的协议 ID
+	// 与 EdgeVPN 兼容，但允许不同的流处理器实现
+	EdgeVPNNoTUN Protocol = "/edgevpn/notun/0.1"
 )
 
 const (

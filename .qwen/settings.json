@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(tailscale.com)",
+      "WebFetch(easytier.rs)",
+      "WebFetch(github.com)",
+      "WebFetch(gvisor.dev)",
+      "WebFetch(ryan-schachte.com)",
+      "WebFetch(pkg.go.dev)",
+      "Bash(go *)"
+    ]
+  },
+  "$version": 3
+}
