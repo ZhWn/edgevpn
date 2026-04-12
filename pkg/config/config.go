@@ -53,6 +53,8 @@ type Config struct {
 	Interface                                  string
 	Libp2pLogLevel, LogLevel                   string
 	LowProfile, BootstrapIface                 bool
+	NoTun                                      bool
+	SOCKS5Listen                               string
 	Blacklist                                  []string
 	Concurrency                                int
 	FrameTimeout                               string
@@ -254,6 +256,8 @@ func (c Config) ToOpts(l *logger.Logger) ([]node.Option, []vpn.Option, error) {
 		vpn.WithPacketMTU(c.PacketMTU),
 		vpn.WithRouterAddress(router),
 		vpn.WithInterfaceName(iface),
+		vpn.WithNoTun(c.NoTun),
+		vpn.WithSOCKS5Listen(c.SOCKS5Listen),
 	}
 
 	libp2pOpts := []libp2p.Option{libp2p.UserAgent("edgevpn")}

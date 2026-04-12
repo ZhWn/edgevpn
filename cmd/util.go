@@ -173,6 +173,17 @@ var CommonFlags []cli.Flag = []cli.Flag{
 		Value:   true,
 	},
 	&cli.BoolFlag{
+		Name:    "no-tun",
+		Usage:   "Run in user-space mode without TUN device (no root required)",
+		EnvVars: []string{"EDGEVPN_NO_TUN"},
+	},
+	&cli.StringFlag{
+		Name:    "socks5-listen",
+		Usage:   "SOCKS5 proxy listen address (used with --no-tun)",
+		EnvVars: []string{"EDGEVPN_SOCKS5_LISTEN"},
+		Value:   "127.0.0.1:1080",
+	},
+	&cli.BoolFlag{
 		Name:    "natservice",
 		Usage:   "Tries to determine reachability status of nodes",
 		EnvVars: []string{"EDGEVPNNATSERVICE"},
@@ -432,6 +443,8 @@ func ConfigFromContext(c *cli.Context) *config.Config {
 		InterfaceMTU:      c.Int("mtu"),
 		PacketMTU:         c.Int("packet-mtu"),
 		BootstrapIface:    c.Bool("bootstrap-iface"),
+		NoTun:             c.Bool("no-tun"),
+		SOCKS5Listen:      c.String("socks5-listen"),
 		Whitelist:         stringsToMultiAddr(c.StringSlice("whitelist")),
 		Ledger: config.Ledger{
 			StateDir:         c.String("ledger-state"),

@@ -29,6 +29,12 @@ type Config struct {
 	MTU              int
 	DeviceType       water.DeviceType
 
+	// NoTun enables user-space networking without a real TUN device.
+	NoTun bool
+
+	// SOCKS5Listen is the listen address for the SOCKS5 proxy in no-tun mode.
+	SOCKS5Listen string
+
 	LedgerAnnounceTime time.Duration
 	Logger             log.StandardLogger
 
@@ -162,3 +168,18 @@ func WithInterfaceAddress(i string) func(cfg *Config) error {
 		return nil
 	}
 }
+
+func WithNoTun(b bool) func(cfg *Config) error {
+	return func(cfg *Config) error {
+		cfg.NoTun = b
+		return nil
+	}
+}
+
+func WithSOCKS5Listen(addr string) func(cfg *Config) error {
+	return func(cfg *Config) error {
+		cfg.SOCKS5Listen = addr
+		return nil
+	}
+}
+

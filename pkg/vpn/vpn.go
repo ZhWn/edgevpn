@@ -20,15 +20,16 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
 	"github.com/ipfs/go-log"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/mudler/edgevpn/internal"
 	"github.com/mudler/edgevpn/pkg/blockchain"
 	"github.com/mudler/edgevpn/pkg/logger"
@@ -36,8 +37,8 @@ import (
 	"github.com/mudler/edgevpn/pkg/protocol"
 	"github.com/mudler/edgevpn/pkg/stream"
 	"github.com/mudler/edgevpn/pkg/types"
+	"github.com/mudler/edgevpn/pkg/virtualtun"
 
-	"github.com/mudler/water"
 	"github.com/pkg/errors"
 	"github.com/songgao/packets/ethernet"
 )
@@ -62,13 +63,65 @@ func VPNNetworkService(p ...Option) node.NetworkService {
 			return err
 		}
 
-		ifce, err := createInterface(c)
-		if err != nil {
-			return err
-		}
-		defer ifce.Close()
-
+		var ifce io.ReadWriteCloser
 		var mgr streamManager
+		var err error
+
+		if c.NoTun {
+			// Derive subnet CIDR from interface address (e.g. "10.1.0.2/24" -> "10.1.0.0/24")
+			subnetCIDR := deriveSubnetCIDR(c.InterfaceAddress)
+			c.Logger.Infof("no-tun mode: interface=%s subnet=%s mtu=%d", c.InterfaceAddress, subnetCIDR, c.InterfaceMTU)
+
+			// Create VirtualTun with gvisor user-space network stack
+			vt, vtErr := virtualtun.New(c.InterfaceAddress, subnetCIDR, c.InterfaceMTU)
+			if vtErr != nil {
+				return vtErr
+			}
+			ifce = vt
+			defer ifce.Close()
+
+			// Start SOCKS5 proxy if configured
+			if c.SOCKS5Listen != "" {
+				proxy := virtualtun.NewSOCKS5Server(c.SOCKS5Listen, vt.Stack(), b)
+				if proxyErr := proxy.Start(); proxyErr != nil {
+					return fmt.Errorf("failed to start SOCKS5 proxy: %w", proxyErr)
+				}
+				c.Logger.Infof("SOCKS5 proxy listening on %s", c.SOCKS5Listen)
+			}
+
+			// Start DynamicForwarder for no-tun ↔ no-tun communication
+			// Automatically forwards any incoming TCP connection on the gvisor stack
+			// to the local OS on the same port, without manual port configuration.
+			df := virtualtun.NewDynamicForwarder(vt.Stack())
+			if dfErr := df.Start(); dfErr != nil {
+				return fmt.Errorf("failed to start dynamic forwarder: %w", dfErr)
+			}
+			c.Logger.Info("DynamicForwarder started for no-tun ↔ no-tun communication")
+			defer df.Close()
+
+			// Start UDP forwarder for no-tun ↔ no-tun UDP communication
+			udf := virtualtun.NewUDPDynamicForwarder(vt.Stack())
+			if udpErr := udf.Start(); udpErr != nil {
+				return fmt.Errorf("failed to start UDP dynamic forwarder: %w", udpErr)
+			}
+			c.Logger.Info("UDP DynamicForwarder started for no-tun ↔ no-tun communication")
+			defer udf.Close()
+
+			// Start ICMP echo handler for ping support between no-tun clients
+			ich := virtualtun.NewICMPEchoHandler(vt.Stack())
+			if icmpErr := ich.Start(); icmpErr != nil {
+				return fmt.Errorf("failed to start ICMP echo handler: %w", icmpErr)
+			}
+			c.Logger.Info("ICMP echo handler started for ping support")
+			defer ich.Close()
+		} else {
+			realIfce, createErr := createInterface(c)
+			if createErr != nil {
+				return createErr
+			}
+			ifce = realIfce
+			defer ifce.Close()
+		}
 
 		if c.lowProfile {
 			// Create stream manager for outgoing connections
@@ -87,6 +140,10 @@ func VPNNetworkService(p ...Option) node.NetworkService {
 		n.Host().SetStreamHandler(protocol.EdgeVPN.ID(), streamHandler(b, ifce, c, nc))
 
 		// Announce our IP
+		ipStr := c.InterfaceAddress
+		if slashIdx := strings.Index(ipStr, "/"); slashIdx >= 0 {
+			ipStr = ipStr[:slashIdx]
+		}
 		ip, _, err := net.ParseCIDR(c.InterfaceAddress)
 		if err != nil {
 			return err
@@ -110,7 +167,7 @@ func VPNNetworkService(p ...Option) node.NetworkService {
 			},
 		)
 
-		if c.NetLinkBootstrap {
+		if c.NetLinkBootstrap && !c.NoTun {
 			if err := prepareInterface(c); err != nil {
 				return err
 			}
@@ -127,7 +184,7 @@ func Register(p ...Option) ([]node.Option, error) {
 	return []node.Option{node.WithNetworkService(VPNNetworkService(p...))}, nil
 }
 
-func streamHandler(l *blockchain.Ledger, ifce *water.Interface, c *Config, nc node.Config) func(stream network.Stream) {
+func streamHandler(l *blockchain.Ledger, ifce io.ReadWriteCloser, c *Config, nc node.Config) func(stream network.Stream) {
 	return func(stream network.Stream) {
 		if len(nc.PeerTable) == 0 && !l.Exists(protocol.MachinesLedgerKey,
 			func(d blockchain.Data) bool {
@@ -150,7 +207,7 @@ func streamHandler(l *blockchain.Ledger, ifce *water.Interface, c *Config, nc no
 				return
 			}
 		}
-		_, err := io.Copy(ifce.ReadWriteCloser, stream)
+		_, err := io.Copy(ifce, stream)
 		if err != nil {
 			stream.Reset()
 		}
@@ -171,7 +228,7 @@ func newBlockChainData(n *node.Node, address string) types.Machine {
 	}
 }
 
-func getFrame(ifce *water.Interface, c *Config) (ethernet.Frame, error) {
+func getFrame(ifce io.Reader, c *Config) (ethernet.Frame, error) {
 	var frame ethernet.Frame
 	frame.Resize(c.MTU)
 
@@ -184,7 +241,7 @@ func getFrame(ifce *water.Interface, c *Config) (ethernet.Frame, error) {
 	return frame, nil
 }
 
-func handleFrame(mgr streamManager, frame ethernet.Frame, c *Config, n *node.Node, ip net.IP, ledger *blockchain.Ledger, ifce *water.Interface, nc node.Config) error {
+func handleFrame(mgr streamManager, frame ethernet.Frame, c *Config, n *node.Node, ip net.IP, ledger *blockchain.Ledger, ifce io.ReadWriteCloser, nc node.Config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.Timeout)
 	defer cancel()
 
@@ -276,7 +333,7 @@ func connectionWorker(
 	ip net.IP,
 	wg *sync.WaitGroup,
 	ledger *blockchain.Ledger,
-	ifce *water.Interface,
+	ifce io.ReadWriteCloser,
 	nc node.Config) {
 	defer wg.Done()
 	for f := range p {
@@ -287,7 +344,7 @@ func connectionWorker(
 }
 
 // readPackets packets from the interface to the node using the routing table in the blockchain
-func readPackets(ctx context.Context, mgr streamManager, c *Config, n *node.Node, ledger *blockchain.Ledger, ifce *water.Interface, nc node.Config) error {
+func readPackets(ctx context.Context, mgr streamManager, c *Config, n *node.Node, ledger *blockchain.Ledger, ifce io.ReadWriteCloser, nc node.Config) error {
 	ip, _, err := net.ParseCIDR(c.InterfaceAddress)
 	if err != nil {
 		return err
@@ -321,4 +378,17 @@ func readPackets(ctx context.Context, mgr streamManager, c *Config, n *node.Node
 			packets <- frame
 		}
 	}
+}
+
+// deriveSubnetCIDR derives a subnet CIDR from an interface address.
+// e.g. "10.1.0.2/24" -> "10.1.0.0/24"
+func deriveSubnetCIDR(addr string) string {
+	ip, ipNet, err := net.ParseCIDR(addr)
+	if err != nil {
+		// Fallback: use the address as-is
+		return addr
+	}
+	// Mask the IP to get the network address
+	ipNet.IP = ip.Mask(ipNet.Mask)
+	return ipNet.String()
 }
